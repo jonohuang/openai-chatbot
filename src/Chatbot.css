@@ -1,0 +1,21 @@
+.chatbot-container {
+  background-color: #f5f5f5;
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.chatbot-message {
+  padding: 10px;
+  margin: 5px;
+  border-radius: 8px;
+}
+
+.user-message {
+  background-color: #d1e7dd;
+  text-align: right;
+}
+
+.assistant-message {
+  background-color: #f8d7da;
+  text-align: left;
+}
