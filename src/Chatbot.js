@@ -12,34 +12,57 @@ const Chatbot = () => {
   const [conversations, setConversations] = useState([]); // State for storing conversations
   const [currentConversation, setCurrentConversation] = useState(0); // State to track current conversation
 
+  const formatResponse = (response) => {
+    // Split the response into paragraphs and filter empty lines
+    const paragraphs = response.split('\n').filter(line => line.trim() !== '').map((para, index) => (
+      <Typography key={index} variant="body1" paragraph>
+        {para}
+      </Typography>
+    ));
+    
+    return <>{paragraphs}</>; // Return formatted paragraphs as JSX elements
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
-
+  
     const userMessage = { role: 'user', content: input };
     const updatedMessages = [...messages, userMessage];
-
+  
     setMessages(updatedMessages);
     setInput('');
     setLoading(true);
-
-    const openaiResponse = await sendMessageToOpenAI(input);
-    const botMessage = { role: 'assistant', content: openaiResponse };
-
-    const finalMessages = [...updatedMessages, botMessage];
-
-    setMessages(finalMessages);
-    setLoading(false);
-    
-    // Save conversation when completed
-    if (conversations[currentConversation]) {
-      setConversations((prev) => {
-        const updated = [...prev];
-        updated[currentConversation] = finalMessages;
-        return updated;
-      });
-    } else {
-      setConversations((prev) => [...prev, finalMessages]);
+  
+    try {
+      const openaiResponse = await sendMessageToOpenAI(input);
+      
+      // Log the response to see its structure
+      console.log('OpenAI Response:', openaiResponse);
+  
+      // Ensure response is a string
+      const botMessageContent = typeof openaiResponse === 'string' ? openaiResponse : JSON.stringify(openaiResponse);
+      
+      const botMessage = { role: 'assistant', content: botMessageContent };
+  
+      const finalMessages = [...updatedMessages, botMessage];
+  
+      setMessages(finalMessages);
+      setLoading(false);
+      
+      // Save conversation when completed
+      if (conversations[currentConversation]) {
+        setConversations((prev) => {
+          const updated = [...prev];
+          updated[currentConversation] = finalMessages;
+          return updated;
+        });
+      } else {
+        setConversations((prev) => [...prev, finalMessages]);
+      }
+    } catch (error) {
+      console.error('Error sending message to OpenAI:', error);
+      setLoading(false);
     }
   };
 
@@ -137,9 +160,10 @@ const Chatbot = () => {
                   borderRadius: '5px',
                   backgroundColor: msg.role === 'user' ? '#cfe9ff' : '#e0e0e0',
                   color: darkMode ? '#000' : '#000',
+                  whiteSpace: 'pre-line', // Preserve line breaks in the response
                 }}
               >
-                {msg.content}
+                {msg.role === 'assistant' ? formatResponse(msg.content) : msg.content}
               </Typography>
             </Box>
           ))}
