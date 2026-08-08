@@ -1,199 +1,470 @@
 // src/Chatbot.js
 
-import React, { useState } from 'react';
-import { TextField, Button, Box, Paper, Typography, CircularProgress, Switch } from '@mui/material';
+import React, { useEffect, useRef, useState } from 'react';
+import './Chatbot.css';
 import { sendMessageToOpenAI } from './openaiService';
+import {
+  ArrowUpIcon,
+  CloseIcon,
+  ComposeIcon,
+  GearIcon,
+  MenuIcon,
+  SearchIcon,
+  SparkIcon,
+} from './icons';
+
+const MODELS = [
+  { id: 'gpt-4o-mini', label: 'GPT-4o mini — fast' },
+  { id: 'gpt-4o', label: 'GPT-4o — smart' },
+];
+
+const TONE_PROMPTS = {
+  Balanced: 'Be helpful and clear. Keep replies under 150 words.',
+  Concise: 'Answer in 1-3 short sentences.',
+  Friendly: 'Be warm and conversational. Keep replies under 150 words.',
+};
+const PLAIN_TEXT_RULE =
+  ' Reply in plain text only — no markdown, no asterisks, no headers, no bullet symbols.';
+
+const SUGGESTIONS = ['Summarise a doc', 'Draft an email', 'Explain some code', 'Brainstorm ideas'];
+
+const STORAGE_KEYS = {
+  conversations: 'chatbot.conversations',
+  darkMode: 'chatbot.darkMode',
+};
+
+const readStored = (key, fallback) => {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+};
+
+const writeStored = (key, value) => {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage unavailable (e.g. private browsing) — the app keeps working in memory.
+  }
+};
+
+// Stored data may be corrupt or from an older shape — never let it crash the app.
+const loadConversations = () => {
+  const raw = readStored(STORAGE_KEYS.conversations, []);
+  if (!Array.isArray(raw)) return [];
+  return raw.map((c) => ({
+    title: typeof c?.title === 'string' ? c.title : 'Untitled',
+    messages: Array.isArray(c?.messages)
+      ? c.messages.filter((m) => m && typeof m.role === 'string' && typeof m.content === 'string')
+      : [],
+    updatedAt: typeof c?.updatedAt === 'number' ? c.updatedAt : 0,
+  }));
+};
+
+const dateGroup = (timestamp) => {
+  if (!timestamp) return 'Earlier';
+  const day = new Date(timestamp).toDateString();
+  const now = new Date();
+  if (day === now.toDateString()) return 'Today';
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  return day === yesterday.toDateString() ? 'Yesterday' : 'Earlier';
+};
 
 const Chatbot = () => {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [darkMode, setDarkMode] = useState(false);
-  const [conversations, setConversations] = useState([]); // State for storing conversations
-  const [currentConversation, setCurrentConversation] = useState(0); // State to track current conversation
+  const [conversations, setConversations] = useState(loadConversations);
+  const [currentIndex, setCurrentIndex] = useState(() => loadConversations().length);
+  const [pendingIndex, setPendingIndex] = useState(null); // conversation awaiting a reply
+  const [darkMode, setDarkMode] = useState(() => readStored(STORAGE_KEYS.darkMode, false));
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [model, setModel] = useState(MODELS[0].id);
+  const [tone, setTone] = useState('Balanced');
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 768px)').matches : false
+  );
 
-  const formatResponse = (response) => {
-    // Split the response into paragraphs and filter empty lines
-    const paragraphs = response.split('\n').filter(line => line.trim() !== '').map((para, index) => (
-      <Typography key={index} variant="body1" paragraph>
-        {para}
-      </Typography>
-    ));
-    
-    return <>{paragraphs}</>; // Return formatted paragraphs as JSX elements
-  };
+  const loading = pendingIndex !== null;
+  const threadRef = useRef(null);
+  const currentIndexRef = useRef(currentIndex);
+  currentIndexRef.current = currentIndex;
+  const pendingMessagesRef = useRef(null); // in-flight thread, so re-selecting it mid-reply keeps the sent message
+  const historyTriggerRef = useRef(null);
+  const settingsTriggerRef = useRef(null);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!input.trim()) return;
-  
-    const userMessage = { role: 'user', content: input };
-    const updatedMessages = [...messages, userMessage];
-  
-    setMessages(updatedMessages);
-    setInput('');
-    setLoading(true);
-  
-    try {
-      const openaiResponse = await sendMessageToOpenAI(input);
-      
-      // Log the response to see its structure
-      console.log('OpenAI Response:', openaiResponse);
-  
-      // Ensure response is a string
-      const botMessageContent = typeof openaiResponse === 'string' ? openaiResponse : JSON.stringify(openaiResponse);
-      
-      const botMessage = { role: 'assistant', content: botMessageContent };
-  
-      const finalMessages = [...updatedMessages, botMessage];
-  
-      setMessages(finalMessages);
-      setLoading(false);
-      
-      // Save conversation when completed
-      if (conversations[currentConversation]) {
-        setConversations((prev) => {
-          const updated = [...prev];
-          updated[currentConversation] = finalMessages;
-          return updated;
-        });
-      } else {
-        setConversations((prev) => [...prev, finalMessages]);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return undefined;
+    const mq = window.matchMedia('(max-width: 768px)');
+    const onChange = (e) => setIsMobile(e.matches);
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+    else mq.addListener(onChange);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', onChange);
+      else mq.removeListener(onChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!historyOpen && !settingsOpen) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setHistoryOpen(false);
+        setSettingsOpen(false);
       }
-    } catch (error) {
-      console.error('Error sending message to OpenAI:', error);
-      setLoading(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [historyOpen, settingsOpen]);
+
+  useEffect(() => {
+    if (!historyOpen && historyTriggerRef.current) {
+      historyTriggerRef.current.focus?.();
+      historyTriggerRef.current = null;
     }
+  }, [historyOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen && settingsTriggerRef.current) {
+      settingsTriggerRef.current.focus?.();
+      settingsTriggerRef.current = null;
+    }
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    writeStored(STORAGE_KEYS.conversations, conversations);
+  }, [conversations]);
+
+  useEffect(() => {
+    writeStored(STORAGE_KEYS.darkMode, darkMode);
+  }, [darkMode]);
+
+  useEffect(() => {
+    const el = threadRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, pendingIndex]);
+
+  const sendText = async (text) => {
+    const trimmed = text.trim();
+    if (!trimmed || loading) return;
+
+    const sendIndex = currentIndex;
+    const sent = [...messages, { role: 'user', content: trimmed }];
+    pendingMessagesRef.current = sent;
+    setMessages(sent);
+    setInput('');
+    setPendingIndex(sendIndex);
+
+    let reply;
+    try {
+      reply = await sendMessageToOpenAI(sent, {
+        model,
+        system: TONE_PROMPTS[tone] + PLAIN_TEXT_RULE,
+      });
+    } catch (error) {
+      reply = "(Couldn't reach the AI — try again in a moment.)";
+    }
+    reply = String(reply).replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#+\s*/gm, '');
+
+    const done = [...sent, { role: 'assistant', content: reply }];
+    setConversations((prev) => {
+      const next = [...prev];
+      const chars = Array.from(trimmed); // slice by code points so emoji at the cut don't break
+      const title =
+        next[sendIndex]?.title ?? chars.slice(0, 32).join('') + (chars.length > 32 ? '…' : '');
+      next[sendIndex] = { title, messages: done, updatedAt: Date.now() };
+      return next;
+    });
+    if (currentIndexRef.current === sendIndex) setMessages(done);
+    pendingMessagesRef.current = null;
+    setPendingIndex(null);
   };
 
-  const toggleDarkMode = () => {
-    setDarkMode(!darkMode);
-  };
-
-  const handleNewConversation = () => {
-    setMessages([]); // Clear current messages
-    setInput(''); // Clear input field
-    setCurrentConversation(conversations.length); // Set to new conversation index
+  const handleNewChat = () => {
+    setMessages([]);
+    setInput('');
+    // An in-flight first reply will save into slot pendingIndex, so a new chat
+    // started meanwhile must reserve the slot after it.
+    setCurrentIndex(
+      pendingIndex !== null && pendingIndex >= conversations.length
+        ? pendingIndex + 1
+        : conversations.length
+    );
+    setHistoryOpen(false);
   };
 
   const handleSelectConversation = (index) => {
-    setMessages(conversations[index]); // Load selected conversation
-    setCurrentConversation(index); // Set as current conversation
+    setMessages(
+      index === pendingIndex && pendingMessagesRef.current
+        ? pendingMessagesRef.current
+        : conversations[index].messages
+    );
+    setCurrentIndex(index);
+    setHistoryOpen(false);
   };
 
-  return (
-    <Box
-      sx={{
-        display: 'flex',
-        height: '100vh',
-        width: '90%',
-        maxWidth: '1000px', // Increased max width for sidebar
-        margin: '0 auto',
-        borderRadius: '10px',
-        boxShadow: 3,
-        backgroundColor: darkMode ? '#424242' : '#fff',
-        color: darkMode ? '#fff' : '#000',
-      }}
-    >
-      {/* Sidebar */}
-      <Box
-        sx={{
-          width: '300px', // Fixed width for sidebar
-          borderRight: '1px solid #ccc',
-          padding: '10px',
-          overflowY: 'scroll',
-          backgroundColor: darkMode ? '#616161' : '#f5f5f5',
-        }}
-      >
-        <Typography variant="h6">Conversations</Typography>
-        <Button variant="contained" onClick={handleNewConversation} sx={{ marginBottom: 2 }}>
-          New Conversation
-        </Button>
-        {conversations.map((_, index) => (
-          <Button
-            key={index}
-            variant="outlined"
-            onClick={() => handleSelectConversation(index)}
-            sx={{ marginBottom: 1, width: '100%' }}
-          >
-            Conversation {index + 1}
-          </Button>
-        ))}
-      </Box>
+  const title = conversations[currentIndex]?.title ?? 'New conversation';
 
-      {/* Chat Area */}
-      <Box
-        sx={{
-          flex: 1,
-          display: 'flex',
-          flexDirection: 'column',
-          padding: '20px',
-        }}
-      >
-        <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-          <Typography variant="h5" align="center">
-            Chatbot
-          </Typography>
-          <Box>
-            <Typography variant="body1" sx={{ mr: 1 }}>
-              Dark Mode
-            </Typography>
-            <Switch checked={darkMode} onChange={toggleDarkMode} />
-          </Box>
-        </Box>
-        <Paper
-          sx={{
-            flex: 1,
-            overflowY: 'scroll',
-            padding: '10px',
-            marginBottom: '10px',
-            backgroundColor: darkMode ? '#616161' : '#f5f5f5',
+  const query = search.trim().toLowerCase();
+  const historyEntries = conversations
+    .map((conv, index) => ({ conv, index }))
+    .filter(({ conv }) => !query || conv.title.toLowerCase().includes(query))
+    .sort((a, b) => (b.conv.updatedAt ?? 0) - (a.conv.updatedAt ?? 0));
+  const groupedEntries = historyEntries.reduce((groups, entry) => {
+    const label = dateGroup(entry.conv.updatedAt);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) {
+      last.entries.push(entry);
+    } else {
+      groups.push({ label, entries: [entry] });
+    }
+    return groups;
+  }, []);
+
+  return (
+    <div className="app" data-theme={darkMode ? 'dark' : 'light'}>
+      <nav className="rail">
+        <button
+          className={`rail-btn${historyOpen ? ' active' : ''}`}
+          title="History"
+          aria-label="History"
+          aria-expanded={historyOpen}
+          aria-controls="history-panel"
+          onClick={() => {
+            if (!historyOpen) historyTriggerRef.current = document.activeElement;
+            setHistoryOpen(!historyOpen);
           }}
         >
-          {messages.map((msg, index) => (
-            <Box key={index} sx={{ textAlign: msg.role === 'user' ? 'right' : 'left', marginBottom: 1 }}>
-              <Typography
-                variant="body1"
-                sx={{
-                  display: 'inline-block',
-                  padding: '10px',
-                  borderRadius: '5px',
-                  backgroundColor: msg.role === 'user' ? '#cfe9ff' : '#e0e0e0',
-                  color: darkMode ? '#000' : '#000',
-                  whiteSpace: 'pre-line', // Preserve line breaks in the response
-                }}
-              >
-                {msg.role === 'assistant' ? formatResponse(msg.content) : msg.content}
-              </Typography>
-            </Box>
-          ))}
-          {loading && (
-            <Box sx={{ textAlign: 'center', marginTop: 2 }}>
-              <CircularProgress />
-            </Box>
-          )}
-        </Paper>
-        <form onSubmit={handleSubmit} style={{ display: 'flex' }}>
-          <TextField
-            variant="outlined"
-            fullWidth
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask me anything..."
-            sx={{ marginRight: 1 }}
-            InputProps={{
-              style: {
-                backgroundColor: darkMode ? '#757575' : '#fff',
-                color: darkMode ? '#fff' : '#000',
-              },
-            }}
+          <MenuIcon />
+        </button>
+        <button className="rail-btn" title="New chat" aria-label="New chat" onClick={handleNewChat}>
+          <ComposeIcon />
+        </button>
+        <div className="rail-avatar">Y</div>
+      </nav>
+
+      {(historyOpen || settingsOpen) && (
+        <div
+          className="scrim"
+          onClick={() => {
+            setHistoryOpen(false);
+            setSettingsOpen(false);
+          }}
+        />
+      )}
+
+      <aside
+        id="history-panel"
+        className={`history${historyOpen ? ' open' : ''}`}
+        aria-label="Conversations"
+        role={isMobile && historyOpen ? 'dialog' : undefined}
+        aria-modal={isMobile && historyOpen ? 'true' : undefined}
+      >
+        <div className="history-header">
+          <span className="history-title">Conversations</span>
+          <button className="icon-btn" aria-label="Close history" onClick={() => setHistoryOpen(false)}>
+            <CloseIcon size={15} />
+          </button>
+        </div>
+        <div className="history-search">
+          <SearchIcon size={15} />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search"
+            aria-label="Search conversations"
           />
-          <Button type="submit" variant="contained" color="primary">
-            Send
-          </Button>
-        </form>
-      </Box>
-    </Box>
+        </div>
+        <button className="history-new" onClick={handleNewChat}>
+          + New conversation
+        </button>
+        <div className="history-list">
+          {groupedEntries.map((group) => (
+            <React.Fragment key={group.label}>
+              <span className="history-group">{group.label}</span>
+              {group.entries.map(({ conv, index }) => (
+                <button
+                  key={index}
+                  className={`history-item${index === currentIndex ? ' active' : ''}`}
+                  aria-current={index === currentIndex ? 'true' : undefined}
+                  onClick={() => handleSelectConversation(index)}
+                >
+                  {conv.title}
+                </button>
+              ))}
+            </React.Fragment>
+          ))}
+          {conversations.length === 0 && (
+            <span className="history-empty">Nothing saved yet — start chatting.</span>
+          )}
+        </div>
+        <div className="history-account">
+          <div className="history-avatar">Y</div>
+          <span className="history-name">You</span>
+          <button
+            className="icon-btn"
+            aria-label="Settings"
+            onClick={() => {
+              settingsTriggerRef.current = document.activeElement;
+              setSettingsOpen(true);
+              setHistoryOpen(false);
+            }}
+          >
+            <GearIcon size={17} />
+          </button>
+        </div>
+      </aside>
+
+      <main className="main" inert={isMobile && (historyOpen || settingsOpen) ? '' : undefined}>
+        <header className="mobile-header">
+          <button
+            className="icon-btn"
+            aria-label="History"
+            aria-expanded={historyOpen}
+            aria-controls="history-panel"
+            onClick={() => {
+              historyTriggerRef.current = document.activeElement;
+              setHistoryOpen(true);
+            }}
+          >
+            <MenuIcon size={20} />
+          </button>
+          <span className="mobile-title">{title}</span>
+          <button className="icon-btn" aria-label="New chat" onClick={handleNewChat}>
+            <ComposeIcon size={18} />
+          </button>
+        </header>
+        <div className="thread-title">{title}</div>
+
+        {messages.length === 0 ? (
+          <div className="empty">
+            <div className="empty-icon">
+              <SparkIcon size={26} />
+            </div>
+            <h1 className="empty-heading">What can I help with?</h1>
+            <div className="chips">
+              {SUGGESTIONS.map((suggestion) => (
+                <button key={suggestion} className="chip" onClick={() => sendText(suggestion)}>
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="thread" ref={threadRef}>
+            <div className="messages" role="log" aria-live="polite">
+              {messages.map((msg, index) => (
+                <div
+                  key={index}
+                  className={`msg ${msg.role === 'user' ? 'user' : 'assistant'}`}
+                >
+                  <span className="sr-only">{msg.role === 'user' ? 'You: ' : 'Assistant: '}</span>
+                  {msg.content}
+                </div>
+              ))}
+              {pendingIndex === currentIndex && (
+                <div className="typing">
+                  <span className="sr-only">Assistant is typing</span>
+                  <span aria-hidden="true" />
+                  <span aria-hidden="true" />
+                  <span aria-hidden="true" />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="composer">
+          <div className="composer-inner">
+            <input
+              className="composer-input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) sendText(input);
+              }}
+              placeholder="Ask me anything…"
+              aria-label="Message"
+            />
+            <button
+              className="send-btn"
+              aria-label="Send"
+              disabled={loading}
+              onClick={() => sendText(input)}
+            >
+              <ArrowUpIcon size={20} />
+            </button>
+          </div>
+        </div>
+      </main>
+
+      <aside
+        className={`inspector${settingsOpen ? ' open' : ''}`}
+        aria-label="Settings"
+        role={isMobile && settingsOpen ? 'dialog' : undefined}
+        aria-modal={isMobile && settingsOpen ? 'true' : undefined}
+      >
+        <div className="inspector-header">
+          <span className="inspector-title">Settings</span>
+          <button
+            className="icon-btn inspector-close"
+            aria-label="Close settings"
+            onClick={() => setSettingsOpen(false)}
+          >
+            <CloseIcon size={16} />
+          </button>
+        </div>
+        <div className="inspector-section">
+          <span className="section-label">Model</span>
+          <select
+            className="model-select"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            aria-label="Model"
+          >
+            {MODELS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="inspector-section">
+          <span className="section-label">Tone</span>
+          <div className="tone-list">
+            {Object.keys(TONE_PROMPTS).map((t) => (
+              <button
+                key={t}
+                className={`tone-item${tone === t ? ' active' : ''}`}
+                aria-pressed={tone === t}
+                onClick={() => setTone(t)}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="inspector-row">
+          <span className="switch-label">Dark mode</span>
+          <button
+            className={`switch${darkMode ? ' on' : ''}`}
+            role="switch"
+            aria-checked={darkMode}
+            aria-label="Dark mode"
+            onClick={() => setDarkMode(!darkMode)}
+          >
+            <span className="knob" />
+          </button>
+        </div>
+        <span className="inspector-footer">
+          Replies are generated live by OpenAI. Conversations are saved in this browser.
+        </span>
+      </aside>
+    </div>
   );
 };
 

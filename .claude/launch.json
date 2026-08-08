@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "chatbot",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "BROWSER=none PATH=/opt/homebrew/bin:$PATH npm start"],
+      "port": 3000
+    }
+  ]
+}
